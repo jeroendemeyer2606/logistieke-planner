@@ -8,7 +8,95 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+// ================================================================
+//  Inline Supabase REST client — geen externe CDN nodig
+//  Ondersteunt select/order, upsert (merge), delete met eq-filters
+// ================================================================
+window.supabase = {
+  createClient(url, anonKey) {
+    const BASE = url.replace(/\/$/, '') + '/rest/v1/';
+    const H = {
+      'apikey': anonKey,
+      'Authorization': 'Bearer ' + anonKey,
+      'Content-Type': 'application/json',
+    };
+
+    function buildQuery(table, filters, selectCols, orderCol, orderAsc) {
+      const parts = [];
+      if (selectCols) parts.push('select=' + encodeURIComponent(selectCols));
+      if (orderCol)   parts.push('order=' + orderCol + (orderAsc ? '.asc' : '.desc'));
+      filters.forEach(([k, v]) => parts.push(k + '=eq.' + encodeURIComponent(v)));
+      return BASE + table + (parts.length ? '?' + parts.join('&') : '');
+    }
+
+    async function doFetch(method, url2, body, extraHeaders) {
+      const h = Object.assign({}, H, extraHeaders || {});
+      const resp = await fetch(url2, {
+        method,
+        headers: h,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      if (!resp.ok) {
+        let msg = resp.status + ' ' + resp.statusText;
+        try { const j = await resp.json(); msg = j.message || j.hint || msg; } catch(e) {}
+        return { data: null, error: { message: msg, status: resp.status } };
+      }
+      if (method === 'GET') {
+        const data = await resp.json().catch(() => []);
+        return { data, error: null };
+      }
+      return { data: null, error: null };
+    }
+
+    return {
+      from(table) {
+        const state = { filters: [], selectCols: '*', orderCol: null, orderAsc: true };
+
+        const chain = {
+          select(cols) { state.selectCols = cols || '*'; return chain; },
+          order(col, opts) {
+            state.orderCol = col;
+            state.orderAsc = opts ? opts.ascending !== false : true;
+            return chain;
+          },
+          eq(col, val) { state.filters.push([col, val]); return chain; },
+
+          // Terminal: run as GET
+          then(resolve, reject) {
+            const url2 = buildQuery(table, state.filters, state.selectCols, state.orderCol, state.orderAsc);
+            return doFetch('GET', url2, undefined, { Accept: 'application/json' }).then(resolve, reject);
+          },
+
+          // Upsert (POST with merge)
+          upsert(rows) {
+            const body = Array.isArray(rows) ? rows : [rows];
+            const url2 = BASE + table;
+            return doFetch('POST', url2, body, {
+              'Prefer': 'resolution=merge-duplicates,return=minimal',
+            });
+          },
+
+          // Delete — returns object with eq() for filtering
+          delete() {
+            const delChain = {
+              eq(col, val) { state.filters.push([col, val]); return delChain; },
+              then(resolve, reject) {
+                let qs = state.filters.map(([k, v]) => k + '=eq.' + encodeURIComponent(v)).join('&');
+                const url2 = BASE + table + (qs ? '?' + qs : '');
+                return doFetch('DELETE', url2, undefined, { 'Prefer': 'return=minimal' }).then(resolve, reject);
+              }
+            };
+            return delChain;
+          },
+        };
+        return chain;
+      }
+    };
+  }
+};
+
+</script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
